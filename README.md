@@ -1,6 +1,31 @@
 # Thermalright Peerless Assassin — segment display protocol
 
-Reverse-engineered notes for the cooler's digital display, driven from Linux.
+Reverse-engineered notes for the cooler's digital display, and a small Zig
+program that drives it from Linux: CPU temperature, CPU clock, CPU + GPU
+power and used disk space.
+
+## Usage
+
+```sh
+nix run github:canassa/peerless-assassin -- run              # live readings to the cooler
+nix run github:canassa/peerless-assassin -- preview --live   # same, drawn in the terminal
+```
+
+On NixOS, the module runs it as a service, gives it access to the display and
+makes the CPU energy counter readable for the power figure:
+
+```nix
+{
+  inputs.peerless-assassin.url = "github:canassa/peerless-assassin";
+
+  # in the system's modules:
+  imports = [ inputs.peerless-assassin.nixosModules.default ];
+  services.peerless-assassin.enable = true;
+}
+```
+
+GPU power comes from NVML, so it needs the NVIDIA driver; without it the
+power figure is the CPU alone.
 
 ## Device
 
