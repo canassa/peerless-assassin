@@ -1,5 +1,7 @@
-//! All sensor sources, opened once at startup. A source that can't be opened
-//! is logged and left out; its part of the display shows dashes.
+//! All sensor sources. A source that can't be opened is logged and left out,
+//! and its part of the display shows dashes. Missing sources are retried now
+//! and then: at boot the service can start before udev has made the RAPL
+//! counter readable.
 
 const std = @import("std");
 const Io = std.Io;
@@ -13,33 +15,39 @@ pub const disk = @import("sensors/disk.zig");
 
 const log = std.log.scoped(.sensors);
 
-cpu_temp: ?CpuTemp,
-cpu_freq: ?CpuFreq,
-rapl: ?Rapl,
+const retry_interval: Io.Duration = .fromSeconds(30);
+
+cpu_temp: ?CpuTemp = null,
+cpu_freq: ?CpuFreq = null,
+rapl: ?Rapl = null,
 /// Absent on machines without an NVIDIA GPU; power is then CPU only.
-nvml: ?Nvml,
+nvml: ?Nvml = null,
+last_attempt: Io.Timestamp,
 
 const Sensors = @This();
 
 pub fn open(io: Io) Sensors {
-    return .{
-        .cpu_temp = CpuTemp.open(io) catch |err| blk: {
-            log.warn("CPU temperature unavailable: {t}", .{err});
-            break :blk null;
-        },
-        .cpu_freq = CpuFreq.open(io) catch |err| blk: {
-            log.warn("CPU clock unavailable: {t}", .{err});
-            break :blk null;
-        },
-        .rapl = Rapl.open(io) catch |err| blk: {
-            log.warn("CPU power unavailable: {t} (energy_uj is root-only by default)", .{err});
-            break :blk null;
-        },
-        .nvml = Nvml.open() catch |err| blk: {
-            log.info("no NVIDIA GPU power: {t}", .{err});
-            break :blk null;
-        },
+    var s: Sensors = .{ .last_attempt = .now(io, .awake) };
+    s.openMissing(io, true);
+    return s;
+}
+
+fn openMissing(s: *Sensors, io: Io, first: bool) void {
+    if (s.cpu_temp == null) s.cpu_temp = opened(CpuTemp, "CPU temperature", CpuTemp.open(io), first);
+    if (s.cpu_freq == null) s.cpu_freq = opened(CpuFreq, "CPU clock", CpuFreq.open(io), first);
+    if (s.rapl == null) s.rapl = opened(Rapl, "CPU power (RAPL energy_uj)", Rapl.open(io), first);
+    if (s.nvml == null) s.nvml = opened(Nvml, "NVIDIA GPU power", Nvml.open(), first);
+    s.last_attempt = .now(io, .awake);
+}
+
+/// Logs a failure on the first attempt only, and a later success.
+fn opened(comptime T: type, what: []const u8, result: anyerror!T, first: bool) ?T {
+    const value = result catch |err| {
+        if (first) log.warn("{s} unavailable: {t}; retrying every 30 s", .{ what, err });
+        return null;
     };
+    if (!first) log.info("{s} now available", .{what});
+    return value;
 }
 
 pub fn close(s: *Sensors, io: Io) void {
@@ -52,6 +60,9 @@ pub fn close(s: *Sensors, io: Io) void {
 /// Reads every source. CPU power compares against the previous call, so the
 /// first reading has no power figure.
 pub fn read(s: *Sensors, io: Io) display.Reading {
+    if (s.last_attempt.untilNow(io, .awake).nanoseconds >= retry_interval.nanoseconds) {
+        s.openMissing(io, false);
+    }
     return .{
         .cpu_temp_c = if (s.cpu_temp) |t| t.read(io) catch null else null,
         .cpu_mhz = if (s.cpu_freq) |f| f.read(io) catch null else null,
